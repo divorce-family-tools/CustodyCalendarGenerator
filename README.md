@@ -1,5 +1,8 @@
 # Custody Calendar Generator
 
+![overview view](overview.png)
+![continuous view](continuous.png)
+
 This Python application generates a detailed, interactive HTML calendar to visualize complex child custody schedules. It is designed to handle different schedules for school and summer periods, calculate time percentages, and provide detailed, auditable reports.
 
 The output is a self-contained web page that can be viewed in any modern browser, with no internet connection required.
