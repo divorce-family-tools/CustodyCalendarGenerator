@@ -46,10 +46,20 @@ def time_to_slot(time_str: str) -> int:
     return hours * 2 + minutes // 30
 
 
-def build_canonical_cycle(rules: list) -> list:
-    """Builds a 28-day (4-week) canonical custody cycle from a set of rules."""
-    cycle_slots = [None] * (28 * SLOTS_PER_DAY)
-    if not rules: return cycle_slots
+def build_canonical_cycle(rules: list) -> (list, int):
+    """Builds a canonical custody cycle from rules and returns the cycle and its length in weeks."""
+    if not rules:
+        return ([None] * (4 * 7 * SLOTS_PER_DAY), 4)  # Default to 4 weeks if no rules
+
+    # Determine cycle length dynamically from the CSV data
+    try:
+        num_weeks = max(int(rule["Week of Four Week Cycle"]) for rule in rules)
+    except (ValueError, KeyError):
+        print("⚠️ Warning: Could not determine cycle length from CSV. Defaulting to 4 weeks.", file=sys.stderr)
+        num_weeks = 4
+
+    total_slots = num_weeks * 7 * SLOTS_PER_DAY
+    cycle_slots = [None] * total_slots
 
     for rule in rules:
         start_day_idx = DAY_MAP[rule["Start Day of Window"]]
@@ -64,8 +74,9 @@ def build_canonical_cycle(rules: list) -> list:
                     7 * SLOTS_PER_DAY) if end_abs_slot_base <= start_abs_slot else end_abs_slot_base
 
         for i in range(start_abs_slot, end_abs_slot):
-            cycle_slots[i % (28 * SLOTS_PER_DAY)] = rule["Custodian"]
-    return cycle_slots
+            cycle_slots[i % total_slots] = rule["Custodian"]
+
+    return cycle_slots, num_weeks
 
 
 def load_json_file(filepath: str, file_type: str) -> dict:
@@ -100,22 +111,27 @@ def build_daily_lookup(years: range, schedule_data: dict) -> list:
         week_num = current_date.isocalendar().week
         day_of_week_lower = DAY_NAMES_LOWER[current_date.isoweekday() % 7]
 
+        # Determine which schedule, cycle, and interaction data to use for the day
         if week_num in school_weeks:
             active_cycle = schedule_data['school_cycle']
+            active_cycle_duration_days = schedule_data['school_cycle_weeks'] * 7
             active_interaction = schedule_data.get('school_interaction')
         elif week_num in summer_weeks:
             active_cycle = schedule_data['summer_cycle']
+            active_cycle_duration_days = schedule_data['summer_cycle_weeks'] * 7
             active_interaction = schedule_data.get('summer_interaction')
-        else:
+        else:  # Day falls in a week not defined in the map
             active_cycle = None
+            active_cycle_duration_days = 0
             active_interaction = None
 
         day_data = {"custody": [None] * SLOTS_PER_DAY, "interaction": None}
 
-        if active_cycle:
+        if active_cycle and active_cycle_duration_days > 0:
             days_since_cycle_start = (current_date - CYCLE_START_DATE).days
-            day_in_4_week_cycle = (days_since_cycle_start % 28 + 28) % 28
-            start_slot = day_in_4_week_cycle * SLOTS_PER_DAY
+            day_in_cycle = (
+                                       days_since_cycle_start % active_cycle_duration_days + active_cycle_duration_days) % active_cycle_duration_days
+            start_slot = day_in_cycle * SLOTS_PER_DAY
             day_data["custody"] = active_cycle[start_slot: start_slot + SLOTS_PER_DAY]
 
         if active_interaction and day_of_week_lower in active_interaction:
@@ -454,12 +470,13 @@ def generate_html_calendar(years: range, daily_lookup: list) -> str:
                         const monthEndIndex = getDayIndex(monthEndDate);
                         const stats = calculateStatsForPeriod(monthStartIndex, monthEndIndex);
 
+                        const momPct = stats.totalSlots > 0 ? (stats.momSlots/stats.totalSlots*100).toFixed(2) + '%' : 'N/A';
+                        const dadPct = stats.totalSlots > 0 ? (stats.dadSlots/stats.totalSlots*100).toFixed(2) + '%' : 'N/A';
                         const momIntPct = stats.totalInteraction > 0 ? (stats.momInteraction/stats.totalInteraction*100).toFixed(2) + '%' : 'N/A';
                         const dadIntPct = stats.totalInteraction > 0 ? (stats.dadInteraction/stats.totalInteraction*100).toFixed(2) + '%' : 'N/A';
 
                         let row = [year, MONTH_NAMES[month], stats.totalSlots, stats.momSlots, stats.dadSlots, 
-                                   (stats.momSlots/stats.totalSlots*100).toFixed(2) + '%', 
-                                   (stats.dadSlots/stats.totalSlots*100).toFixed(2) + '%',
+                                   momPct, dadPct,
                                    stats.momInteraction, stats.dadInteraction, stats.totalInteraction,
                                    momIntPct, dadIntPct];
                         csvRows.push(row);
@@ -512,8 +529,8 @@ if __name__ == "__main__":
         sys.exit(1)
 
     print("Building canonical cycles for each schedule type...")
-    schedules['school_cycle'] = build_canonical_cycle(schedules['school_rules'])
-    schedules['summer_cycle'] = build_canonical_cycle(schedules['summer_rules'])
+    schedules['school_cycle'], schedules['school_cycle_weeks'] = build_canonical_cycle(schedules['school_rules'])
+    schedules['summer_cycle'], schedules['summer_cycle_weeks'] = build_canonical_cycle(schedules['summer_rules'])
 
     print("Building master daily lookup for all years...")
     daily_lookup_data = build_daily_lookup(years_range, schedules)
