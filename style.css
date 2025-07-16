@@ -1,0 +1,72 @@
+
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background-color: #f4f4f9; color: #333; margin: 0; padding: 20px; }
+        body.modal-open { overflow: hidden; }
+        .container { max-width: 1400px; margin: auto; }
+        .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; flex-wrap: wrap; }
+        h1 { text-align: left; flex-grow: 1; }
+        h2, h3 { text-align: center; color: #444; }
+        h2 { background-color: #e9ecef; padding: 15px; border-radius: 8px; margin-top: 40px; }
+        h3 { margin-block-start: 10px; margin-block-end: 10px; }
+        .stats, .interaction-stats { display: flex; justify-content: center; align-items: center; gap: 20px; font-weight: 500; margin-bottom: 10px;}
+        .interaction-stats { font-size: 0.9em; font-style: italic; color: #555; }
+        .legend { display: flex; justify-content: center; align-items: center; gap: 20px; font-weight: 500; margin: 0 auto; }
+        .legend-text { font-size: 1.1em; font-weight: bold; }
+        .legend-color { width: 20px; height: 20px; border-radius: 4px; border: 1px solid #ccc; margin-right: 8px;}
+        #settingsBtn { font-size: 1.5em; background: none; border: none; cursor: pointer; padding: 5px 10px; }
+        .calendar-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(400px, 1fr)); gap: 30px; }
+        .calendar-month { background-color: #fff; border-radius: 8px; padding: 15px; box-shadow: 0 4px 8px rgba(0,0,0,0.05); cursor: pointer; transition: transform 0.2s, box-shadow 0.2s; }
+        .calendar-month:hover { transform: translateY(-5px); box-shadow: 0 8px 16px rgba(0,0,0,0.1); }
+        .calendar-table { width: 100%; border-collapse: collapse; }
+        th, td { text-align: left; padding: 0; vertical-align: top; height: 80px; border: 1px solid #e0e0e0; position: relative; }
+        th { font-size: 0.8em; color: #666; padding-bottom: 5px; text-align: center; border: none; }
+        .day-number { position: absolute; top: 4px; left: 4px; font-size: 0.9em; font-weight: bold; z-index: 10; }
+        .custody-bar { display: flex; width: 100%; height: 100%; position: absolute; top: 0; left: 0; }
+        .mom-block { background-color: var(--mom-color); }
+        .dad-block { background-color: var(--dad-color); }
+        .noday { background-color: #f8f8f8; border-color: #f8f8f8; }
+
+        /* Continuous View Styling */
+        .month-header-row { display: none; }
+        .month-header-cell { text-align: center; font-weight: bold; background-color: #f8f8f8; color: #555; border-bottom: 2px solid #ddd; }
+        body.continuous-view .month-header-cell { font-size: 1em; padding: 4px; line-height: 1.1; }
+        body.continuous-view th { padding-bottom: 3px; }
+        body.continuous-view td { height: 40px; }
+        body.continuous-view .calendar-grid { display: block; border: 1px solid #ccc; box-shadow: 0 4px 8px rgba(0,0,0,0.05); }
+        body.continuous-view .calendar-month { padding: 0; margin: 0; border-radius: 0; box-shadow: none; cursor: default; }
+        body.continuous-view .calendar-month:hover { transform: none; }
+        body.continuous-view .calendar-month h3, body.continuous-view .month-stats, body.continuous-view .interaction-stats { display: none; }
+        body.continuous-view .month-header-row { display: table-row; }
+
+        /* Modal Styles */
+        .modal-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.6); z-index: 100; display: none; align-items: center; justify-content: center; }
+        .modal-content { background: #fff; padding: 20px 30px; border-radius: 10px; max-width: 90%; position: relative; }
+        .modal-content.month-modal { width: 1200px; }
+        .modal-content.settings-modal { width: 320px; }
+        .modal-close { position: absolute; top: 10px; right: 20px; font-size: 30px; font-weight: bold; cursor: pointer; }
+        .modal-body .calendar-table td { height: 140px; }
+        .settings-modal .settings-item { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 20px; }
+        .settings-modal .button-group { display: flex; gap: 10px; margin-top: 20px; }
+        .settings-modal .button-group button { flex-grow: 1; font-size: 1em; padding: 10px 15px; border-radius: 5px; cursor: pointer; }
+        #exportBtn { border: 1px solid #007bff; background-color: #007bff; color: white; }
+        #exportCalculationsBtn { border: 1px solid #17a2b8; background-color: #17a2b8; color: white; }
+
+        /* Toggle Switch */
+        .toggle-switch { position: relative; display: inline-block; width: 50px; height: 24px; }
+        .toggle-switch input { opacity: 0; width: 0; height: 0; }
+        .slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: #ccc; border-radius: 24px; transition: .4s; }
+        .slider:before { position: absolute; content: ""; height: 16px; width: 16px; left: 4px; bottom: 4px; background-color: white; border-radius: 50%; transition: .4s; }
+        input:checked + .slider { background-color: #2196F3; }
+        input:checked + .slider:before { transform: translateX(26px); }
+
+        /* Print-specific Styles */
+        @media print {
+            body { background-color: #fff !important; }
+            .header, .modal-overlay, .interaction-stats { display: none !important; }
+            .calendar-grid { display: grid !important; }
+            .calendar-month { box-shadow: none !important; border: 1px solid #ccc !important; page-break-inside: avoid; cursor: default; }
+            h2 { page-break-before: always; page-break-after: avoid; }
+            h1, h2, h3 { color: #000; }
+            .month-header-row { display: none !important; }
+            .custody-block, .legend-color, .legend-text span { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+        }
+    
