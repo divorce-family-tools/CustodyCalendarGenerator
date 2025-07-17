@@ -4,19 +4,14 @@ import csv
 import sys
 from collections import defaultdict
 import json
+import argparse
+import re
 
 # --- Configuration ---
 MOM_COLOR = "#ffb6c1"
 DAD_COLOR = "#add8e6"
-OUTPUT_HTML_FILE = "custody_calendar.html"
-CSS_FILE = "style.css"
-
-# File Names
-SCHEDULE_MAP_FILE = "schedule_map.json"
-SCHOOL_SCHEDULE_FILE = "school_schedule.csv"
-SUMMER_SCHEDULE_FILE = "summer_schedule.csv"
-SCHOOL_INTERACTION_FILE = "school_interaction.json"
-SUMMER_INTERACTION_FILE = "summer_interaction.json"
+DEFAULT_OUTPUT_HTML_FILE = "custody_calendar.html"
+DEFAULT_CSS_FILE = "style.css"
 
 # The cycle start date will be calculated dynamically after loading the start year.
 CYCLE_START_DATE = None
@@ -27,6 +22,16 @@ SLOTS_PER_DAY = 48
 
 
 # --- Core Logic ---
+
+def sanitize_filename(text: str) -> str:
+    """Converts a string into a safe, usable filename."""
+    if not text:
+        return ""
+    text = text.lower()
+    text = re.sub(r'\s+', '_', text)  # Replace spaces with underscores
+    text = re.sub(r'[^a-z0-9_-]', '', text)  # Remove all non-alphanumeric chars except _ and -
+    return text[:60]  # Truncate to a reasonable length
+
 
 def parse_schedule_from_csv(filepath: str) -> list:
     """Parses the schedule from a CSV file into a list of rules."""
@@ -46,16 +51,32 @@ def time_to_slot(time_str: str) -> int:
     return hours * 2 + minutes // 30
 
 
+def slot_to_12h_time(slot: int) -> str:
+    """Converts a slot index to a formatted 12-hour time string."""
+    if slot >= SLOTS_PER_DAY: return ""
+    h24 = slot // 2
+    minutes = (slot % 2) * 30
+
+    ampm = 'AM' if h24 < 12 else 'PM'
+    h12 = h24 % 12
+    if h12 == 0: h12 = 12
+
+    if minutes == 0:
+        return f"{h12}{ampm}"
+    else:
+        return f"{h12}:{minutes:02d}{ampm}"
+
+
 def build_canonical_cycle(rules: list) -> (list, int):
     """Builds a canonical custody cycle from rules and returns the cycle and its length in weeks."""
     if not rules:
-        return ([None] * (4 * 7 * SLOTS_PER_DAY), 4)  # Default to 4 weeks if no rules
+        return ([None] * (4 * 7 * SLOTS_PER_DAY), 4)
 
-    # Determine cycle length dynamically from the CSV data
     try:
-        num_weeks = max(int(rule["Week of Four Week Cycle"]) for rule in rules)
+        num_weeks = max(int(rule["Week of Cycle"]) for rule in rules)
     except (ValueError, KeyError):
-        print("⚠️ Warning: Could not determine cycle length from CSV. Defaulting to 4 weeks.", file=sys.stderr)
+        print("⚠️ Warning: Could not find 'Week of Cycle' column or values are invalid. Defaulting to 4 weeks.",
+              file=sys.stderr)
         num_weeks = 4
 
     total_slots = num_weeks * 7 * SLOTS_PER_DAY
@@ -66,12 +87,12 @@ def build_canonical_cycle(rules: list) -> (list, int):
         end_day_idx = DAY_MAP[rule["End Day of Window"]]
         start_slot_in_day = time_to_slot(rule["Start Time of Window"])
         end_slot_in_day = time_to_slot(rule["End Time of Window"])
-        week = int(rule["Week of Four Week Cycle"])
+        week = int(rule["Week of Cycle"])
 
         start_abs_slot = ((week - 1) * 7 + start_day_idx) * SLOTS_PER_DAY + start_slot_in_day
         end_abs_slot_base = ((week - 1) * 7 + end_day_idx) * SLOTS_PER_DAY + end_slot_in_day
         end_abs_slot = end_abs_slot_base + (
-                    7 * SLOTS_PER_DAY) if end_abs_slot_base <= start_abs_slot else end_abs_slot_base
+                7 * SLOTS_PER_DAY) if end_abs_slot_base <= start_abs_slot else end_abs_slot_base
 
         for i in range(start_abs_slot, end_abs_slot):
             cycle_slots[i % total_slots] = rule["Custodian"]
@@ -81,6 +102,7 @@ def build_canonical_cycle(rules: list) -> (list, int):
 
 def load_json_file(filepath: str, file_type: str) -> dict:
     """Loads and validates a JSON file."""
+    if not filepath: return None
     try:
         with open(filepath, 'r', encoding='utf-8') as f:
             return json.load(f)
@@ -111,7 +133,6 @@ def build_daily_lookup(years: range, schedule_data: dict) -> list:
         week_num = current_date.isocalendar().week
         day_of_week_lower = DAY_NAMES_LOWER[current_date.isoweekday() % 7]
 
-        # Determine which schedule, cycle, and interaction data to use for the day
         if week_num in school_weeks:
             active_cycle = schedule_data['school_cycle']
             active_cycle_duration_days = schedule_data['school_cycle_weeks'] * 7
@@ -120,7 +141,7 @@ def build_daily_lookup(years: range, schedule_data: dict) -> list:
             active_cycle = schedule_data['summer_cycle']
             active_cycle_duration_days = schedule_data['summer_cycle_weeks'] * 7
             active_interaction = schedule_data.get('summer_interaction')
-        else:  # Day falls in a week not defined in the map
+        else:
             active_cycle = None
             active_cycle_duration_days = 0
             active_interaction = None
@@ -143,16 +164,77 @@ def build_daily_lookup(years: range, schedule_data: dict) -> list:
     return daily_lookup
 
 
+def build_markers_and_labels(years: range, schedule_data: dict, daily_lookup: list) -> (dict, dict):
+    """Builds markers and labels for all schedule rules across the entire date range."""
+    window_markers = defaultdict(lambda: defaultdict(list))
+    end_time_labels = defaultdict(lambda: defaultdict(str))
+
+    schedule_map = schedule_data.get('map', {})
+
+    for schedule_type in ['school', 'summer']:
+        rules = schedule_data.get(f'{schedule_type}_rules')
+        cycle_weeks = schedule_data.get(f'{schedule_type}_cycle_weeks')
+        valid_weeks = set(schedule_map.get(f'{schedule_type}_weeks', []))
+
+        if not rules or not cycle_weeks or not valid_weeks:
+            continue
+
+        for rule in rules:
+            try:
+                week = int(rule["Week of Cycle"])
+                window_num = rule["Window number"]
+                start_day_idx = DAY_MAP[rule["Start Day of Window"]]
+                end_day_idx = DAY_MAP[rule["End Day of Window"]]
+                start_slot_in_day = time_to_slot(rule["Start Time of Window"])
+                end_slot_in_day = time_to_slot(rule["End Time of Window"])
+            except (KeyError, ValueError) as e:
+                print(f"⚠️ Warning: Skipping rule due to missing/invalid data: {rule}. Error: {e}", file=sys.stderr)
+                continue
+
+            start_abs_slot = ((week - 1) * 7 + start_day_idx) * SLOTS_PER_DAY + start_slot_in_day
+            end_abs_slot_base = ((week - 1) * 7 + end_day_idx) * SLOTS_PER_DAY + end_slot_in_day
+            end_abs_slot = end_abs_slot_base + (
+                        7 * SLOTS_PER_DAY) if end_abs_slot_base <= start_abs_slot else end_abs_slot_base
+
+            day_of_start_in_cycle = start_abs_slot // SLOTS_PER_DAY
+            day_of_end_in_cycle = end_abs_slot // SLOTS_PER_DAY
+
+            for day_offset in range(len(daily_lookup)):
+                current_date = datetime.date(years.start, 1, 1) + datetime.timedelta(days=day_offset)
+
+                if current_date.isocalendar().week not in valid_weeks:
+                    continue
+
+                days_since_cycle_start = (current_date - CYCLE_START_DATE).days
+                day_in_this_schedule_cycle = (days_since_cycle_start % (cycle_weeks * 7) + (cycle_weeks * 7)) % (
+                            cycle_weeks * 7)
+
+                if day_in_this_schedule_cycle == day_of_start_in_cycle:
+                    marker_id = f"{schedule_type.capitalize()} {week}-{window_num}"
+                    slot = start_abs_slot % SLOTS_PER_DAY
+                    window_markers[current_date][slot].append(f"{marker_id} START")
+
+                if day_in_this_schedule_cycle == day_of_end_in_cycle:
+                    marker_id = f"{schedule_type.capitalize()} {week}-{window_num}"
+                    slot = end_abs_slot % SLOTS_PER_DAY
+                    window_markers[current_date][slot].append(f"{marker_id} END")
+                    if slot != 0:
+                        end_time_labels[current_date][slot] = slot_to_12h_time(slot)
+
+    return window_markers, end_time_labels
+
+
 # --- File Generation ---
 
-def write_css_file():
-    """Writes the content for the external style.css file."""
-    css_content = f"""
+def get_default_css() -> str:
+    """Returns the default CSS content as a string."""
+    return f"""
         body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background-color: #f4f4f9; color: #333; margin: 0; padding: 20px; }}
         body.modal-open {{ overflow: hidden; }}
         .container {{ max-width: 1400px; margin: auto; }}
-        .header {{ display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; flex-wrap: wrap; }}
-        h1 {{ text-align: left; flex-grow: 1; }}
+        .header {{ display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; flex-wrap: wrap; }}
+        h1 {{ text-align: left; flex-grow: 1; margin-bottom: 0; }}
+        .page-description {{ width: 100%; text-align: center; font-size: 1.2em; font-weight: bold; color: #555; margin-bottom: 20px; }}
         h2, h3 {{ text-align: center; color: #444; }}
         h2 {{ background-color: #e9ecef; padding: 15px; border-radius: 8px; margin-top: 40px; }}
         h3 {{ margin-block-start: 10px; margin-block-end: 10px; }}
@@ -173,6 +255,13 @@ def write_css_file():
         .mom-block {{ background-color: var(--mom-color); }}
         .dad-block {{ background-color: var(--dad-color); }}
         .noday {{ background-color: #f8f8f8; border-color: #f8f8f8; }}
+
+        /* State-dependent styling */
+        .end-time-label {{ position: absolute; top: 5px; transform: translateX(-50%); font-size: 10px; font-weight: 600; color: #333; background: rgba(255,255,255,0.8); padding: 1px 4px; border-radius: 3px; z-index: 15; white-space: nowrap; }}
+        .debug-marker-wrapper {{ position: absolute; top: 0; bottom: 0; width: 1px; background-color: #d00; display: none; z-index: 20; }}
+        .debug-marker {{ position: relative; top: 25px; transform: translateX(-50%); background: #d00; color: white; padding: 2px 5px; font-size: 10px; border-radius: 3px; white-space: nowrap; margin-bottom: 2px; }}
+        body.debug-mode .debug-marker-wrapper {{ display: block; }}
+        body.debug-mode .end-time-label {{ display: none; }}
 
         /* Continuous View Styling */
         .month-header-row {{ display: none; }}
@@ -207,44 +296,62 @@ def write_css_file():
         input:checked + .slider {{ background-color: #2196F3; }}
         input:checked + .slider:before {{ transform: translateX(26px); }}
 
+        .pdf-header {{ display: none; }}
         /* Print-specific Styles */
         @media print {{
-            body {{ background-color: #fff !important; }}
+            body {{ background-color: #fff !important; padding-top: 50px; }}
+            .page-description {{ display: block; position: fixed; top: 0; left: 0; right: 0; text-align: center; padding: 10px; font-size: 1.2em; font-weight: bold; border-bottom: 1px solid #ccc; background-color: #fff; z-index: 1000;}}
+            .container {{ margin-top: 0; }}
             .header, .modal-overlay, .interaction-stats {{ display: none !important; }}
             .calendar-grid {{ display: grid !important; }}
             .calendar-month {{ box-shadow: none !important; border: 1px solid #ccc !important; page-break-inside: avoid; cursor: default; }}
             h2 {{ page-break-before: always; page-break-after: avoid; }}
             h1, h2, h3 {{ color: #000; }}
-            .month-header-row {{ display: none !important; }}
+            .month-header-row, .debug-marker-wrapper {{ display: none !important; }}
+            .end-time-label {{ display: block !important; }}
             .custody-block, .legend-color, .legend-text span {{ -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
         }}
     """
+
+
+def write_default_css_file():
+    """Writes the default CSS content to a file."""
     try:
-        with open(CSS_FILE, "w", encoding="utf-8") as f:
-            f.write(css_content)
-        print(f"✅ Success! Stylesheet saved to '{CSS_FILE}'")
+        with open(DEFAULT_CSS_FILE, "w", encoding="utf-8") as f:
+            f.write(get_default_css())
+        print(f"✅ Success! Default stylesheet saved to '{DEFAULT_CSS_FILE}'")
     except IOError as e:
         print(f"❌ Error: Could not write stylesheet. Reason: {e}", file=sys.stderr)
 
 
-def generate_html_calendar(years: range, daily_lookup: list) -> str:
+def generate_html_calendar(years: range, daily_lookup: list, window_markers: dict, end_time_labels: dict, css_path=None,
+                           description=None) -> str:
     """Generates the full HTML file content for the calendar."""
 
     daily_lookup_json = json.dumps(daily_lookup)
+    description_json = json.dumps(description)
+
+    title_text = f"Custody Calendar ({years.start}-{years.stop - 1})"
+    if description:
+        title_text += f" - {description}"
+
+    if css_path:
+        style_block = f'<link rel="stylesheet" href="{css_path}">'
+    else:
+        style_block = f'<style>{get_default_css()}</style>'
 
     html_start = f"""
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Custody Calendar ({years.start}-{years.stop - 1})</title>
-    <style>
-      :root {{ --mom-color: {MOM_COLOR}; --dad-color: {DAD_COLOR}; }}
-    </style>
-    <link rel="stylesheet" href="{CSS_FILE}">
+    <title>{title_text}</title>
+    <style> :root {{ --mom-color: {MOM_COLOR}; --dad-color: {DAD_COLOR}; }} </style>
+    {style_block}
 </head>
 <body>
     <div class="container">
+        <div class="page-description">{description or ''}</div>
         <div class="header">
             <h1>Child Custody Calendar</h1>
             <div class="legend">
@@ -259,15 +366,13 @@ def generate_html_calendar(years: range, daily_lookup: list) -> str:
     cal = calendar.Calendar(firstweekday=6)
 
     for year in years:
-        html_body += f"<div data-year-container='{year}'>"
-        html_body += f"<h2>{year}</h2>"
+        html_body += f"<div data-year-container='{year}'><h2>{year}</h2>"
         html_body += f"<div class='stats year-stats' data-year='{year}'></div>"
         html_body += f"<div class='interaction-stats' id='interaction-stats-year-{year}'></div>"
         html_body += f"<div class='calendar-grid'>"
 
         for month in range(1, 13):
             month_name = datetime.date(year, month, 1).strftime('%B')
-
             html_body += f"<div class='calendar-month'><div class='month-content'>"
             html_body += f"<h3>{month_name}</h3><div class='stats month-stats' data-year='{year}' data-month='{month}'></div>"
             html_body += f"<div class='interaction-stats' id='interaction-stats-month-{year}-{month}'></div>"
@@ -291,13 +396,21 @@ def generate_html_calendar(years: range, daily_lookup: list) -> str:
                         html_body += "<div class='custody-bar'>"
                         for i in range(SLOTS_PER_DAY):
                             custodian = custody_slots[i]
-                            color_class = ""
-                            if custodian == "Mom":
-                                color_class = "mom-block"
-                            elif custodian == "Dad":
-                                color_class = "dad-block"
+                            color_class = "mom-block" if custodian == "Mom" else "dad-block" if custodian == "Dad" else ""
                             html_body += f"<div class='custody-block {color_class}' style='width: {1 / SLOTS_PER_DAY * 100:.2f}%;'></div>"
-                        html_body += "</div></td>"
+                        html_body += "</div>"
+
+                        day_labels = end_time_labels.get(day_date, {})
+                        for slot, label_text in day_labels.items():
+                            html_body += f"<div class='end-time-label' style='left: {(slot / SLOTS_PER_DAY) * 100:.2f}%;'>{label_text}</div>"
+
+                        day_markers = window_markers.get(day_date, {})
+                        for slot, markers in day_markers.items():
+                            html_body += f"<div class='debug-marker-wrapper' style='left: {(slot / SLOTS_PER_DAY) * 100:.2f}%;'>"
+                            for marker_text in markers:
+                                html_body += f"<div class='debug-marker'>{marker_text}</div>"
+                            html_body += "</div>"
+                        html_body += "</td>"
                 html_body += "</tr>"
             html_body += "</tbody></table></div></div>"
         html_body += "</div></div>"
@@ -307,17 +420,20 @@ def generate_html_calendar(years: range, daily_lookup: list) -> str:
     <div id="monthModal" class="modal-overlay"><div class="modal-content month-modal"><span class="modal-close">&times;</span><div class="modal-body"></div></div></div>
     <div id="settingsModal" class="modal-overlay"><div class="modal-content settings-modal"><span class="modal-close">&times;</span><h3>Settings</h3>
         <div class="settings-item"><span>Continuous View</span><label class="toggle-switch"><input type="checkbox" id="viewToggle"><span class="slider"></span></label></div>
+        <div class="settings-item"><span>Show Window Markers</span><label class="toggle-switch"><input type="checkbox" id="debugToggle"><span class="slider"></span></label></div>
         <div class="button-group"><button id="exportBtn">Export Page</button><button id="exportCalculationsBtn">Export Calculations</button></div>
     </div></div>
 
     <script>
         const DAILY_LOOKUP = {daily_lookup_json};
+        const CALENDAR_DESCRIPTION = {description_json};
         const CALENDAR_START_DATE = new Date("{years.start}", 0, 1);
         const SLOTS_PER_DAY = {SLOTS_PER_DAY};
         const MONTH_NAMES = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
 
         document.addEventListener('DOMContentLoaded', () => {{
             const viewToggle = document.getElementById('viewToggle');
+            const debugToggle = document.getElementById('debugToggle');
             const exportBtn = document.getElementById('exportBtn');
             const exportCalculationsBtn = document.getElementById('exportCalculationsBtn');
             const settingsBtn = document.getElementById('settingsBtn');
@@ -328,6 +444,7 @@ def generate_html_calendar(years: range, daily_lookup: list) -> str:
             function closeModal(modal) {{ modal.style.display = 'none'; if (!document.querySelector('.modal-overlay[style*="display: flex"]')) document.body.classList.remove('modal-open'); }}
 
             viewToggle.addEventListener('change', () => document.body.classList.toggle('continuous-view', viewToggle.checked));
+            debugToggle.addEventListener('change', () => document.body.classList.toggle('debug-mode', debugToggle.checked));
             exportBtn.addEventListener('click', () => window.print());
             settingsBtn.addEventListener('click', () => openModal(settingsModal));
             exportCalculationsBtn.addEventListener('click', exportCalculationsToCSV);
@@ -361,13 +478,11 @@ def generate_html_calendar(years: range, daily_lookup: list) -> str:
                 for (let i = startIndex; i <= endIndex; i++) {{
                     const dayData = DAILY_LOOKUP[i];
                     if (!dayData) continue;
-
                     for (const custodian of dayData.custody) {{
                         if (custodian === 'Mom') momSlots++;
                         else if (custodian === 'Dad') dadSlots++;
                     }}
                     totalSlots += dayData.custody.length;
-
                     const window = dayData.interaction;
                     if (window) {{
                         const startSlot = timeToSlot(window.start);
@@ -400,9 +515,10 @@ def generate_html_calendar(years: range, daily_lookup: list) -> str:
                     const yearEndIndex = getDayIndex(yearEndDate);
 
                     const calculatedYearStats = calculateStatsForPeriod(yearStartIndex, yearEndIndex);
-
                     const yearStatsDiv = yearEl.querySelector('.year-stats');
-                    yearStatsDiv.innerHTML = `<div>Mom: ${{(calculatedYearStats.momSlots / calculatedYearStats.totalSlots * 100).toFixed(2)}}%</div><div>Dad: ${{(calculatedYearStats.dadSlots / calculatedYearStats.totalSlots * 100).toFixed(2)}}%</div>`;
+                    if(calculatedYearStats.totalSlots > 0) {{
+                        yearStatsDiv.innerHTML = `<div>Mom: ${{(calculatedYearStats.momSlots / calculatedYearStats.totalSlots * 100).toFixed(2)}}%</div><div>Dad: ${{(calculatedYearStats.dadSlots / calculatedYearStats.totalSlots * 100).toFixed(2)}}%</div>`;
+                    }}
 
                     if (calculatedYearStats.totalInteraction > 0) {{
                         const resultDiv = yearEl.querySelector(`#interaction-stats-year-${{year}}`);
@@ -419,7 +535,9 @@ def generate_html_calendar(years: range, daily_lookup: list) -> str:
                         const calculatedMonthStats = calculateStatsForPeriod(monthStartIndex, monthEndIndex);
 
                         const monthStatsDiv = yearEl.querySelector(`.month-stats[data-month='${{month+1}}']`);
-                        if(monthStatsDiv) monthStatsDiv.innerHTML = `<div>Mom: ${{(calculatedMonthStats.momSlots / calculatedMonthStats.totalSlots * 100).toFixed(2)}}%</div><div>Dad: ${{(calculatedMonthStats.dadSlots / calculatedMonthStats.totalSlots * 100).toFixed(2)}}%</div>`;
+                        if(monthStatsDiv && calculatedMonthStats.totalSlots > 0) {{
+                            monthStatsDiv.innerHTML = `<div>Mom: ${{(calculatedMonthStats.momSlots / calculatedMonthStats.totalSlots * 100).toFixed(2)}}%</div><div>Dad: ${{(calculatedMonthStats.dadSlots / calculatedMonthStats.totalSlots * 100).toFixed(2)}}%</div>`;
+                        }}
 
                         if(calculatedMonthStats.totalInteraction > 0) {{
                             const resultDiv = yearEl.querySelector(`#interaction-stats-month-${{year}}-${{month+1}}`);
@@ -435,6 +553,10 @@ def generate_html_calendar(years: range, daily_lookup: list) -> str:
                 const quote = (val) => `"${{String(val === null || val === undefined ? '' : val).replace(/"/g, '""')}}"`;
                 let csvRows = [];
 
+                if (CALENDAR_DESCRIPTION) {{
+                    csvRows.push([quote(CALENDAR_DESCRIPTION)]);
+                    csvRows.push([]);
+                }}
                 csvRows.push(["Custody Percentage Calculation Audit File"]);
                 csvRows.push([quote('Generated On:'), quote(new Date().toLocaleDateString())]);
                 csvRows.push([quote('Purpose:'), quote('This file breaks down the custody schedule to show how time percentages are calculated. All time is measured in 30-minute blocks (slots).')]);
@@ -446,9 +568,11 @@ def generate_html_calendar(years: range, daily_lookup: list) -> str:
                 csvRows.push([`OVERALL SUMMARY (${{startYear}} - ${{endYear}})`]);
                 csvRows.push(["Calculation Type", "Mom's Slots", "Dad's Slots", "Total Slots", "Mom's Percentage", "Dad's Percentage"]);
 
-                const totalMomPct = (overallStats.momSlots / overallStats.totalSlots * 100).toFixed(2) + '%';
-                const totalDadPct = (overallStats.dadSlots / overallStats.totalSlots * 100).toFixed(2) + '%';
-                csvRows.push(["Total Custody Time", overallStats.momSlots, overallStats.dadSlots, overallStats.totalSlots, totalMomPct, totalDadPct]);
+                if (overallStats.totalSlots > 0) {{
+                    const totalMomPct = (overallStats.momSlots / overallStats.totalSlots * 100).toFixed(2) + '%';
+                    const totalDadPct = (overallStats.dadSlots / overallStats.totalSlots * 100).toFixed(2) + '%';
+                    csvRows.push(["Total Custody Time", overallStats.momSlots, overallStats.dadSlots, overallStats.totalSlots, totalMomPct, totalDadPct]);
+                }}
 
                 if(overallStats.totalInteraction > 0) {{
                     const intMomPct = (overallStats.momInteraction / overallStats.totalInteraction * 100).toFixed(2) + '%';
@@ -496,19 +620,39 @@ def generate_html_calendar(years: range, daily_lookup: list) -> str:
             runAllCalculations();
         }});
     </script>
-</body>
-</html>
     """
     return html_start + html_body + html_end
 
 
 # --- Main Execution ---
 if __name__ == "__main__":
-    write_css_file()
+    parser = argparse.ArgumentParser(
+        description="Generate a custody calendar HTML file from schedule definitions.",
+        formatter_class=argparse.RawTextHelpFormatter
+    )
+    parser.add_argument('map_file',
+                        help="Path to the main schedule_map.json file.")
+    parser.add_argument('school_schedule',
+                        help="Path to the school schedule CSV file.")
+    parser.add_argument('summer_schedule', nargs='?', default=None,
+                        help="Path to the summer schedule CSV file (optional).")
+    parser.add_argument('--school_interaction', default=None,
+                        help="Path to the school interaction JSON file (optional).")
+    parser.add_argument('--summer_interaction', default=None,
+                        help="Path to the summer interaction JSON file (optional).")
+    parser.add_argument('--style-file', help="Path to an existing CSS file to use for styling.")
+    parser.add_argument('--write-style-defaults', action='store_true',
+                        help=f"Write the default styles to {DEFAULT_CSS_FILE} and exit.")
+    parser.add_argument('--description', help="A description for the calendar titles and headers.")
+    args = parser.parse_args()
 
-    schedule_map = load_json_file(SCHEDULE_MAP_FILE, "Schedule Map")
+    if args.write_style_defaults:
+        write_default_css_file()
+        sys.exit(0)
+
+    schedule_map = load_json_file(args.map_file, "Schedule Map")
     if not schedule_map or 'start_year' not in schedule_map or 'end_year' not in schedule_map:
-        print(f"❌ Error: '{SCHEDULE_MAP_FILE}' must exist and contain 'start_year' and 'end_year' keys.",
+        print(f"❌ Error: '{args.map_file}' must exist and contain 'start_year' and 'end_year' keys.",
               file=sys.stderr)
         sys.exit(1)
 
@@ -518,14 +662,14 @@ if __name__ == "__main__":
 
     schedules = {
         'map': schedule_map,
-        'school_rules': parse_schedule_from_csv(SCHOOL_SCHEDULE_FILE),
-        'summer_rules': parse_schedule_from_csv(SUMMER_SCHEDULE_FILE),
-        'school_interaction': load_json_file(SCHOOL_INTERACTION_FILE, "School Interaction"),
-        'summer_interaction': load_json_file(SUMMER_INTERACTION_FILE, "Summer Interaction"),
+        'school_rules': parse_schedule_from_csv(args.school_schedule),
+        'summer_rules': parse_schedule_from_csv(args.summer_schedule),
+        'school_interaction': load_json_file(args.school_interaction, "School Interaction"),
+        'summer_interaction': load_json_file(args.summer_interaction, "Summer Interaction"),
     }
 
     if not schedules['school_rules']:
-        print(f"❌ Error: Could not load '{SCHOOL_SCHEDULE_FILE}'. This file is required.", file=sys.stderr)
+        print(f"❌ Error: Could not load '{args.school_schedule}'. This file is required.", file=sys.stderr)
         sys.exit(1)
 
     print("Building canonical cycles for each schedule type...")
@@ -535,12 +679,29 @@ if __name__ == "__main__":
     print("Building master daily lookup for all years...")
     daily_lookup_data = build_daily_lookup(years_range, schedules)
 
+    print("Building window markers and time labels...")
+    window_markers, end_time_labels = build_markers_and_labels(years_range, schedules, daily_lookup_data)
+
+    # Determine output filename
+    output_filename = DEFAULT_OUTPUT_HTML_FILE
+    if args.description:
+        safe_desc = sanitize_filename(args.description)
+        if safe_desc:
+            output_filename = f"{safe_desc}_{DEFAULT_OUTPUT_HTML_FILE}"
+
     print(f"Generating HTML calendar for {start_year}-{end_year}...")
-    html_content = generate_html_calendar(years_range, daily_lookup_data)
+    html_content = generate_html_calendar(
+        years=years_range,
+        daily_lookup=daily_lookup_data,
+        window_markers=window_markers,
+        end_time_labels=end_time_labels,
+        css_path=args.style_file,
+        description=args.description
+    )
 
     try:
-        with open(OUTPUT_HTML_FILE, "w", encoding="utf-8") as f:
+        with open(output_filename, "w", encoding="utf-8") as f:
             f.write(html_content)
-        print(f"✅ Success! Calendar saved to '{OUTPUT_HTML_FILE}' and '{CSS_FILE}'")
+        print(f"✅ Success! Calendar saved to '{output_filename}'")
     except IOError as e:
-        print(f"❌ Error: Could not write to file '{OUTPUT_HTML_FILE}'. Reason: {e}", file=sys.stderr)
+        print(f"❌ Error: Could not write to file '{output_filename}'. Reason: {e}", file=sys.stderr)
