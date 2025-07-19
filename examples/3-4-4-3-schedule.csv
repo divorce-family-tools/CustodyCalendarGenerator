@@ -1,0 +1,5 @@
+Custodian,Week of Cycle,Window number,Start Day of Window,Start Time of Window,End Day of Window,End Time of Window
+Mom,1,1,Sunday,18:00,Wednesday,18:00
+Dad,1,2,Wednesday,18:00,Sunday,18:00
+Mom,2,1,Sunday,18:00,Thursday,18:00
+Dad,2,2,Thursday,18:00,Sunday,18:00
