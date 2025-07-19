@@ -11,21 +11,21 @@ Performing step 1:
 3. Name the calendar and click "Create calendar"
 4. Click the back arrow to return to the main Google calendar page
 
-![Step 1: Create a new calendar](CreateNewCalendar.png)
+![Step 1: Create a new calendar](CreateNewCalendar.jpg)
 
 ## Step 2: Open the setting panel
 
 Performing step 2:
 1. Click on the gear symbol and select "Settings"
 
-![Step 2: Open the setting panel](CalendarSettings.png)
+![Step 2: Open the setting panel](CalendarSettings.jpg)
 
 ## Step 3: Click "Import & Export"
 
 Performing step 3:
 1. On the left panel of the settings screen, click "Import & Export"
 
-![Step 3: Click "Import & Export"](CalendarImport.png)
+![Step 3: Click "Import & Export"](CalendarImport.jpg)
 
 
 ## Step 4: Importing the file
@@ -40,4 +40,4 @@ Performing step 4:
 4. Wait for a pop-up to say the calendar events have been imported. This can take some time.
 5. Click the back array to return to the main Google calendar window
 
-![Step 4: Importing the file](CalendarImportScreen.png)
+![Step 4: Importing the file](CalendarImportScreen.jpg)
