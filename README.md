@@ -151,7 +151,7 @@ Notice that, event though the custody is approximately 60/40, the time you can i
 
 ### ICalendar (ICS)
 
-An ICS file is a standard calendar file format, also known as iCalendar, that is used to share calendar information like events, to-dos, and journal entries between different calendar applications. It allows users to easily add events from emails, websites, or other sources into their calendars. 
+An ICS file is a standard calendar file format, also known as iCalendar, that is used to share calendar information like events, to-dos, and journal entries between different calendar applications. It allows users to easily add events from emails, websites, or other sources into their calendars. Follow [these](Docs/ImportICSIntoGoogleCalendar.md) instructions to import the file into Google calendar. 
 
 #### 3-4-4-3
 
