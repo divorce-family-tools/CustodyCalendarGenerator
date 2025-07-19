@@ -7,13 +7,19 @@ import json
 import argparse
 import re
 
+try:
+    from ics import Calendar, Event
+    from tzlocal import get_localzone
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+except ImportError:
+    pass  # Handled in main execution block where it's needed
+
 # --- Configuration ---
 MOM_COLOR = "#ffb6c1"
 DAD_COLOR = "#add8e6"
 DEFAULT_OUTPUT_HTML_FILE = "custody_calendar.html"
 DEFAULT_CSS_FILE = "style.css"
 
-# The cycle start date will be calculated dynamically after loading the start year.
 CYCLE_START_DATE = None
 DAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
 DAY_NAMES_LOWER = [d.lower() for d in DAY_NAMES]
@@ -28,9 +34,9 @@ def sanitize_filename(text: str) -> str:
     if not text:
         return ""
     text = text.lower()
-    text = re.sub(r'\s+', '_', text)  # Replace spaces with underscores
-    text = re.sub(r'[^a-z0-9_-]', '', text)  # Remove all non-alphanumeric chars except _ and -
-    return text[:60]  # Truncate to a reasonable length
+    text = re.sub(r'\s+', '_', text)
+    text = re.sub(r'[^a-z0-9_-]', '', text)
+    return text[:60]
 
 
 def parse_schedule_from_csv(filepath: str) -> list:
@@ -142,9 +148,7 @@ def build_daily_lookup(years: range, schedule_data: dict) -> list:
             active_cycle_duration_days = schedule_data['summer_cycle_weeks'] * 7
             active_interaction = schedule_data.get('summer_interaction')
         else:
-            active_cycle = None
-            active_cycle_duration_days = 0
-            active_interaction = None
+            active_cycle, active_cycle_duration_days, active_interaction = None, 0, None
 
         day_data = {"custody": [None] * SLOTS_PER_DAY, "interaction": None}
 
@@ -185,16 +189,16 @@ def build_markers_and_labels(years: range, schedule_data: dict, daily_lookup: li
                 window_num = rule["Window number"]
                 start_day_idx = DAY_MAP[rule["Start Day of Window"]]
                 end_day_idx = DAY_MAP[rule["End Day of Window"]]
-                start_slot_in_day = time_to_slot(rule["Start Time of Window"])
-                end_slot_in_day = time_to_slot(rule["End Time of Window"])
             except (KeyError, ValueError) as e:
                 print(f"⚠️ Warning: Skipping rule due to missing/invalid data: {rule}. Error: {e}", file=sys.stderr)
                 continue
 
-            start_abs_slot = ((week - 1) * 7 + start_day_idx) * SLOTS_PER_DAY + start_slot_in_day
-            end_abs_slot_base = ((week - 1) * 7 + end_day_idx) * SLOTS_PER_DAY + end_slot_in_day
+            start_abs_slot = ((week - 1) * 7 + start_day_idx) * SLOTS_PER_DAY + time_to_slot(
+                rule["Start Time of Window"])
+            end_abs_slot_base = ((week - 1) * 7 + end_day_idx) * SLOTS_PER_DAY + time_to_slot(
+                rule["End Time of Window"])
             end_abs_slot = end_abs_slot_base + (
-                        7 * SLOTS_PER_DAY) if end_abs_slot_base <= start_abs_slot else end_abs_slot_base
+                    7 * SLOTS_PER_DAY) if end_abs_slot_base <= start_abs_slot else end_abs_slot_base
 
             day_of_start_in_cycle = start_abs_slot // SLOTS_PER_DAY
             day_of_end_in_cycle = end_abs_slot // SLOTS_PER_DAY
@@ -207,7 +211,7 @@ def build_markers_and_labels(years: range, schedule_data: dict, daily_lookup: li
 
                 days_since_cycle_start = (current_date - CYCLE_START_DATE).days
                 day_in_this_schedule_cycle = (days_since_cycle_start % (cycle_weeks * 7) + (cycle_weeks * 7)) % (
-                            cycle_weeks * 7)
+                        cycle_weeks * 7)
 
                 if day_in_this_schedule_cycle == day_of_start_in_cycle:
                     marker_id = f"{schedule_type.capitalize()} {week}-{window_num}"
@@ -222,6 +226,92 @@ def build_markers_and_labels(years: range, schedule_data: dict, daily_lookup: li
                         end_time_labels[current_date][slot] = slot_to_12h_time(slot)
 
     return window_markers, end_time_labels
+
+
+# --- iCal Export Logic ---
+def generate_ical_file(years: range, schedule_data: dict, output_filename: str, description: str, tz: datetime.tzinfo):
+    """Generates a timezone-aware iCalendar (.ics) file from the schedule rules."""
+    print(f"Generating iCalendar file using timezone: {tz}...")
+
+    schedule_map = schedule_data.get('map', {})
+    global CYCLE_START_DATE
+    first_day = datetime.date(years.start, 1, 1)
+    CYCLE_START_DATE = first_day - datetime.timedelta(days=first_day.isoweekday() % 7)
+
+    raw_events = []
+    for schedule_type in ['school', 'summer']:
+        rules = schedule_data.get(f'{schedule_type}_rules')
+        cycle_weeks = schedule_data.get(f'{schedule_type}_cycle_weeks')
+        valid_iso_weeks = set(schedule_map.get(f'{schedule_type}_weeks', []))
+
+        if not rules or not cycle_weeks or not valid_iso_weeks:
+            continue
+
+        for rule in rules:
+            try:
+                week_in_cycle = int(rule["Week of Cycle"])
+                custodian = rule["Custodian"]
+                start_day_idx = DAY_MAP[rule["Start Day of Window"]]
+                start_h, start_m = map(int, rule["Start Time of Window"].split(':'))
+
+                start_abs_slot = ((week_in_cycle - 1) * 7 + start_day_idx) * SLOTS_PER_DAY + time_to_slot(
+                    rule["Start Time of Window"])
+                end_day_idx = DAY_MAP[rule["End Day of Window"]]
+                end_abs_slot_base = ((week_in_cycle - 1) * 7 + end_day_idx) * SLOTS_PER_DAY + time_to_slot(
+                    rule["End Time of Window"])
+                end_abs_slot = end_abs_slot_base + (
+                            7 * SLOTS_PER_DAY) if end_abs_slot_base < start_abs_slot else end_abs_slot_base
+                duration_in_minutes = (end_abs_slot - start_abs_slot) * 30
+
+                first_start_day = CYCLE_START_DATE + datetime.timedelta(
+                    days=(((week_in_cycle - 1) * 7) + start_day_idx))
+
+                cycle_duration_delta = datetime.timedelta(weeks=cycle_weeks)
+                current_start_day = first_start_day
+                while current_start_day.year < years.stop:
+                    if current_start_day.year >= years.start and current_start_day.isocalendar().week in valid_iso_weeks:
+                        start_dt = datetime.datetime(current_start_day.year, current_start_day.month,
+                                                     current_start_day.day, start_h, start_m, tzinfo=tz)
+                        end_dt = start_dt + datetime.timedelta(minutes=duration_in_minutes)
+
+                        event = Event()
+                        event.name = f"{custodian}'s Custody"
+                        if description: event.description = description
+                        event.begin = start_dt
+                        event.end = end_dt
+                        raw_events.append(event)
+
+                    current_start_day += cycle_duration_delta
+
+            except (KeyError, ValueError) as e:
+                print(f"⚠️ Warning: Skipping rule in .ics export due to invalid data: {rule}. Error: {e}",
+                      file=sys.stderr)
+
+    if not raw_events:
+        print("⚠️ Warning: No events generated to export.")
+        return
+
+    print("Merging consecutive events...")
+    raw_events.sort(key=lambda e: e.begin)
+
+    merged_events = []
+    if raw_events:
+        current_event = raw_events[0]
+        for next_event in raw_events[1:]:
+            if next_event.name == current_event.name and next_event.begin == current_event.end:
+                current_event.end = next_event.end
+            else:
+                merged_events.append(current_event)
+                current_event = next_event
+        merged_events.append(current_event)
+
+    cal = Calendar(events=merged_events)
+    try:
+        with open(output_filename, 'w', encoding="utf-8") as f:
+            f.writelines(cal.serialize_iter())
+        print(f"✅ Success! Calendar data exported to '{output_filename}'")
+    except IOError as e:
+        print(f"❌ Error: Could not write to file '{output_filename}'. Reason: {e}", file=sys.stderr)
 
 
 # --- File Generation ---
@@ -627,23 +717,34 @@ def generate_html_calendar(years: range, daily_lookup: list, window_markers: dic
 # --- Main Execution ---
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Generate a custody calendar HTML file from schedule definitions.",
+        description="Generate a custody calendar from schedule definitions.",
         formatter_class=argparse.RawTextHelpFormatter
     )
+    # Arguments for all modes
     parser.add_argument('map_file',
                         help="Path to the main schedule_map.json file.")
     parser.add_argument('school_schedule',
                         help="Path to the school schedule CSV file.")
     parser.add_argument('summer_schedule', nargs='?', default=None,
                         help="Path to the summer schedule CSV file (optional).")
-    parser.add_argument('--school_interaction', default=None,
-                        help="Path to the school interaction JSON file (optional).")
-    parser.add_argument('--summer_interaction', default=None,
-                        help="Path to the summer interaction JSON file (optional).")
-    parser.add_argument('--style-file', help="Path to an existing CSS file to use for styling.")
-    parser.add_argument('--write-style-defaults', action='store_true',
-                        help=f"Write the default styles to {DEFAULT_CSS_FILE} and exit.")
     parser.add_argument('--description', help="A description for the calendar titles and headers.")
+
+    # Mode-specific arguments
+    html_group = parser.add_argument_group('HTML Output (Default Mode)')
+    html_group.add_argument('--school_interaction', default=None,
+                            help="Path to the school interaction JSON file.")
+    html_group.add_argument('--summer_interaction', default=None,
+                            help="Path to the summer interaction JSON file.")
+    html_group.add_argument('--style-file', help="Path to an existing CSS file to use for styling.")
+
+    action_group = parser.add_argument_group('Standalone Actions & iCal Export')
+    action_group.add_argument('--write-style-defaults', action='store_true',
+                              help=f"Write the default styles to {DEFAULT_CSS_FILE} and exit.")
+    action_group.add_argument('--export-ical', metavar="FILENAME.ICS",
+                              help="Export the schedule to an iCalendar (.ics) file and exit.")
+    action_group.add_argument('--timezone',
+                              help="Specify timezone for iCal export (e.g., 'America/New_York').\nDefaults to local system time.")
+
     args = parser.parse_args()
 
     if args.write_style_defaults:
@@ -676,32 +777,54 @@ if __name__ == "__main__":
     schedules['school_cycle'], schedules['school_cycle_weeks'] = build_canonical_cycle(schedules['school_rules'])
     schedules['summer_cycle'], schedules['summer_cycle_weeks'] = build_canonical_cycle(schedules['summer_rules'])
 
-    print("Building master daily lookup for all years...")
-    daily_lookup_data = build_daily_lookup(years_range, schedules)
+    # --- Mode selection: iCal Export or HTML Generation ---
+    if args.export_ical:
+        try:
+            from ics import Calendar, Event
+            from tzlocal import get_localzone
+            from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+        except ImportError:
+            print("❌ Error: Required libraries for iCal export are missing.", file=sys.stderr)
+            print("Please install them by running: pip install ics tzlocal", file=sys.stderr)
+            sys.exit(1)
 
-    print("Building window markers and time labels...")
-    window_markers, end_time_labels = build_markers_and_labels(years_range, schedules, daily_lookup_data)
+        tz = None
+        if args.timezone:
+            try:
+                tz = ZoneInfo(args.timezone)
+            except ZoneInfoNotFoundError:
+                print(f"❌ Error: Timezone '{args.timezone}' not found.", file=sys.stderr)
+                sys.exit(1)
+        else:
+            tz = get_localzone()
+        generate_ical_file(years_range, schedules, args.export_ical, args.description, tz)
+    else:
+        # Full HTML generation path
+        print("Building master daily lookup for all years...")
+        daily_lookup_data = build_daily_lookup(years_range, schedules)
 
-    # Determine output filename
-    output_filename = DEFAULT_OUTPUT_HTML_FILE
-    if args.description:
-        safe_desc = sanitize_filename(args.description)
-        if safe_desc:
-            output_filename = f"{safe_desc}_{DEFAULT_OUTPUT_HTML_FILE}"
+        print("Building window markers and time labels...")
+        window_markers, end_time_labels = build_markers_and_labels(years_range, schedules, daily_lookup_data)
 
-    print(f"Generating HTML calendar for {start_year}-{end_year}...")
-    html_content = generate_html_calendar(
-        years=years_range,
-        daily_lookup=daily_lookup_data,
-        window_markers=window_markers,
-        end_time_labels=end_time_labels,
-        css_path=args.style_file,
-        description=args.description
-    )
+        output_filename = DEFAULT_OUTPUT_HTML_FILE
+        if args.description:
+            safe_desc = sanitize_filename(args.description)
+            if safe_desc:
+                output_filename = f"{safe_desc}_{DEFAULT_OUTPUT_HTML_FILE}"
 
-    try:
-        with open(output_filename, "w", encoding="utf-8") as f:
-            f.write(html_content)
-        print(f"✅ Success! Calendar saved to '{output_filename}'")
-    except IOError as e:
-        print(f"❌ Error: Could not write to file '{output_filename}'. Reason: {e}", file=sys.stderr)
+        print(f"Generating HTML calendar for {start_year}-{end_year}...")
+        html_content = generate_html_calendar(
+            years=years_range,
+            daily_lookup=daily_lookup_data,
+            window_markers=window_markers,
+            end_time_labels=end_time_labels,
+            css_path=args.style_file,
+            description=args.description
+        )
+
+        try:
+            with open(output_filename, "w", encoding="utf-8") as f:
+                f.write(html_content)
+            print(f"✅ Success! Calendar saved to '{output_filename}'")
+        except IOError as e:
+            print(f"❌ Error: Could not write to file '{output_filename}'. Reason: {e}", file=sys.stderr)
