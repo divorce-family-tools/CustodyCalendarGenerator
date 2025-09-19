@@ -73,6 +73,53 @@ def slot_to_12h_time(slot: int) -> str:
         return f"{h12}:{minutes:02d}{ampm}"
 
 
+def format_time_12h(time_str: str) -> str:
+    """Converts 'HH:MM' time string to a friendly 12-hour format."""
+    if not time_str: return "an unspecified time"
+    if time_str == "24:00": return "the end of the day"
+    if time_str == "00:00": return "the start of the day (midnight)"
+
+    try:
+        hours, minutes = map(int, time_str.split(':'))
+    except ValueError:
+        return time_str  # Return original if format is unexpected
+
+    ampm = 'AM' if hours < 12 else 'PM'
+    h12 = hours % 12
+    if h12 == 0: h12 = 12
+
+    if minutes == 0:
+        return f"{h12} {ampm}"
+    else:
+        return f"{h12}:{minutes:02d} {ampm}"
+
+
+def format_time_legal(time_str: str) -> str:
+    """Converts 'HH:MM' time string to a legal-style 12-hour format."""
+    if not time_str: return "an unspecified time"
+    if time_str == "24:00": return "11:59 p.m."
+
+    try:
+        hours, minutes = map(int, time_str.split(':'))
+    except ValueError:
+        return time_str
+
+    if hours == 0:
+        h12 = 12
+        ampm = 'a.m.'
+    elif hours < 12:
+        h12 = hours
+        ampm = 'a.m.'
+    elif hours == 12:
+        h12 = 12
+        ampm = 'p.m.'
+    else:
+        h12 = hours - 12
+        ampm = 'p.m.'
+
+    return f"{h12}:{minutes:02d} {ampm}"
+
+
 def build_canonical_cycle(rules: list) -> (list, int):
     """Builds a canonical custody cycle from rules and returns the cycle and its length in weeks."""
     if not rules:
@@ -155,7 +202,7 @@ def build_daily_lookup(years: range, schedule_data: dict) -> list:
         if active_cycle and active_cycle_duration_days > 0:
             days_since_cycle_start = (current_date - CYCLE_START_DATE).days
             day_in_cycle = (
-                                       days_since_cycle_start % active_cycle_duration_days + active_cycle_duration_days) % active_cycle_duration_days
+                                   days_since_cycle_start % active_cycle_duration_days + active_cycle_duration_days) % active_cycle_duration_days
             start_slot = day_in_cycle * SLOTS_PER_DAY
             day_data["custody"] = active_cycle[start_slot: start_slot + SLOTS_PER_DAY]
 
@@ -228,6 +275,123 @@ def build_markers_and_labels(years: range, schedule_data: dict, daily_lookup: li
     return window_markers, end_time_labels
 
 
+# --- Text Description Logic ---
+
+def get_date_ranges_from_weeks(years_range: range, week_numbers: list) -> list:
+    """Converts a list of ISO week numbers into formatted, grouped date ranges."""
+    if not week_numbers:
+        return []
+
+    date_format = "%B %d, %Y"
+    ranges = []
+
+    for year in years_range:
+        # Get all valid weeks for the current year
+        weeks_in_year = sorted([w for w in set(week_numbers) if 1 <= w <= 53])
+        if not weeks_in_year:
+            continue
+
+        # Group consecutive weeks
+        start_week = weeks_in_year[0]
+        end_week = weeks_in_year[0]
+
+        for i in range(1, len(weeks_in_year)):
+            if weeks_in_year[i] == end_week + 1:
+                end_week = weeks_in_year[i]
+            else:
+                # End of a range found, format and add it
+                start_date = datetime.date.fromisocalendar(year, start_week, 1)  # Monday
+                end_date = datetime.date.fromisocalendar(year, end_week, 7)  # Sunday
+                ranges.append(f"{start_date.strftime(date_format)} - {end_date.strftime(date_format)}")
+                # Start a new range
+                start_week = weeks_in_year[i]
+                end_week = weeks_in_year[i]
+
+        # Add the last range
+        start_date = datetime.date.fromisocalendar(year, start_week, 1)  # Monday
+        end_date = datetime.date.fromisocalendar(year, end_week, 7)  # Sunday
+        ranges.append(f"{start_date.strftime(date_format)} - {end_date.strftime(date_format)}")
+
+    return ranges
+
+
+def generate_schedule_description_text(rules: list, cycle_weeks: int, schedule_name: str, valid_ranges: list) -> str:
+    """Generates a text description of a schedule formatted for a legal document."""
+    if not rules:
+        return f"{schedule_name.title()} Schedule\nNo rules found for this schedule.\n"
+
+    # --- Sort and validate the rules ---
+    def sort_key(rule):
+        try:
+            week = int(rule['Week of Cycle'])
+            day_idx = DAY_MAP[rule['Start Day of Window']]
+            slot = time_to_slot(rule['Start Time of Window']) or 0
+            return (week, day_idx, slot)
+        except (KeyError, ValueError):
+            return (float('inf'), float('inf'), float('inf'))
+
+    sorted_rules = sorted(rules, key=sort_key)
+    valid_rules = [r for r in sorted_rules if r.get('Custodian')]
+
+    if not valid_rules:
+        return f"{schedule_name.title()} Schedule\nNo valid rules found for this schedule.\n"
+
+    # --- Merge consecutive rules ---
+    merged_rules = []
+    if valid_rules:
+        current_merged_rule = valid_rules[0].copy()
+        for next_rule in valid_rules[1:]:
+            can_merge = (
+                    current_merged_rule['Custodian'] == next_rule['Custodian'] and
+                    current_merged_rule['End Day of Window'] == next_rule['Start Day of Window'] and
+                    current_merged_rule['End Time of Window'] == next_rule['Start Time of Window'] and
+                    int(current_merged_rule['Week of Cycle']) == int(next_rule['Week of Cycle'])
+            )
+            if can_merge:
+                current_merged_rule['End Day of Window'] = next_rule['End Day of Window']
+                current_merged_rule['End Time of Window'] = next_rule['End Time of Window']
+            else:
+                merged_rules.append(current_merged_rule)
+                current_merged_rule = next_rule.copy()
+        merged_rules.append(current_merged_rule)
+
+    # --- Build the description string ---
+    description_parts = []
+    description_parts.append(f"{schedule_name.title()} Schedule Description")
+    description_parts.append(f"This is a {cycle_weeks}-week repeating cycle.")
+
+    if valid_ranges:
+        description_parts.append("\nValid Dates:")
+        for date_range in valid_ranges:
+            description_parts.append(f"  {date_range}")
+
+    description_parts.append("")  # Add a newline before the first week's table
+
+    current_week = -1
+    col_1_width = 55
+
+    for rule in merged_rules:
+        week = int(rule["Week of Cycle"])
+        if week != current_week:
+            if current_week != -1: description_parts.append("")  # Space between weeks
+            description_parts.append(f"Week {week}:")
+            header1 = "Day/Time Period"
+            header2 = "Custody"
+            description_parts.append(f"{header1.ljust(col_1_width)}{header2}")
+            current_week = week
+
+        custodian = rule["Custodian"]
+        start_day = rule["Start Day of Window"]
+        start_time = format_time_legal(rule["Start Time of Window"])
+        end_day = rule["End Day of Window"]
+        end_time = format_time_legal(rule["End Time of Window"])
+
+        time_period = f"{start_day} {start_time} – {end_day} {end_time}"
+        description_parts.append(f"{time_period.ljust(col_1_width)}{custodian}")
+
+    return "\n".join(description_parts) + "\n"
+
+
 # --- iCal Export Logic ---
 def generate_ical_file(years: range, schedule_data: dict, output_filename: str, description: str, tz: datetime.tzinfo):
     """Generates a timezone-aware iCalendar (.ics) file from the schedule rules."""
@@ -260,7 +424,7 @@ def generate_ical_file(years: range, schedule_data: dict, output_filename: str, 
                 end_abs_slot_base = ((week_in_cycle - 1) * 7 + end_day_idx) * SLOTS_PER_DAY + time_to_slot(
                     rule["End Time of Window"])
                 end_abs_slot = end_abs_slot_base + (
-                            7 * SLOTS_PER_DAY) if end_abs_slot_base < start_abs_slot else end_abs_slot_base
+                        7 * SLOTS_PER_DAY) if end_abs_slot_base < start_abs_slot else end_abs_slot_base
                 duration_in_minutes = (end_abs_slot - start_abs_slot) * 30
 
                 first_start_day = CYCLE_START_DATE + datetime.timedelta(
@@ -690,9 +854,9 @@ def generate_html_calendar(years: range, daily_lookup: list, window_markers: dic
                         const dadIntPct = stats.totalInteraction > 0 ? (stats.dadInteraction/stats.totalInteraction*100).toFixed(2) + '%' : 'N/A';
 
                         let row = [year, MONTH_NAMES[month], stats.totalSlots, stats.momSlots, stats.dadSlots, 
-                                   momPct, dadPct,
-                                   stats.momInteraction, stats.dadInteraction, stats.totalInteraction,
-                                   momIntPct, dadIntPct];
+                                     momPct, dadPct,
+                                     stats.momInteraction, stats.dadInteraction, stats.totalInteraction,
+                                     momIntPct, dadIntPct];
                         csvRows.push(row);
                     }}
                 }}
@@ -742,6 +906,8 @@ if __name__ == "__main__":
                               help=f"Write the default styles to {DEFAULT_CSS_FILE} and exit.")
     action_group.add_argument('--export-ical', metavar="FILENAME.ICS",
                               help="Export the schedule to an iCalendar (.ics) file and exit.")
+    action_group.add_argument('--describe', action='store_true',
+                              help="Generate a human-readable description of the schedule and print it to the console.")
     action_group.add_argument('--timezone',
                               help="Specify timezone for iCal export (e.g., 'America/New_York').\nDefaults to local system time.")
 
@@ -773,11 +939,38 @@ if __name__ == "__main__":
         print(f"❌ Error: Could not load '{args.school_schedule}'. This file is required.", file=sys.stderr)
         sys.exit(1)
 
-    print("Building canonical cycles for each schedule type...")
     schedules['school_cycle'], schedules['school_cycle_weeks'] = build_canonical_cycle(schedules['school_rules'])
     schedules['summer_cycle'], schedules['summer_cycle_weeks'] = build_canonical_cycle(schedules['summer_rules'])
 
-    # --- Mode selection: iCal Export or HTML Generation ---
+    # --- Mode selection ---
+    if args.describe:
+        print("--- Human-Readable Schedule Summary ---")
+
+        # Get date ranges for school schedule
+        school_weeks = schedules['map'].get('school_weeks', [])
+        school_ranges = get_date_ranges_from_weeks(years_range, school_weeks)
+        school_desc = generate_schedule_description_text(
+            schedules['school_rules'],
+            schedules['school_cycle_weeks'],
+            "School",
+            school_ranges
+        )
+        print(school_desc)
+
+        # Get date ranges for summer schedule
+        if schedules['summer_rules']:
+            summer_weeks = schedules['map'].get('summer_weeks', [])
+            summer_ranges = get_date_ranges_from_weeks(years_range, summer_weeks)
+            summer_desc = generate_schedule_description_text(
+                schedules['summer_rules'],
+                schedules['summer_cycle_weeks'],
+                "Summer",
+                summer_ranges
+            )
+            print(summer_desc)
+
+        sys.exit(0)
+
     if args.export_ical:
         try:
             from ics import Calendar, Event
